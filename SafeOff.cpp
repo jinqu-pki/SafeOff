@@ -4,14 +4,21 @@
 #include "framework.h"
 #include "SafeOff.h"
 #include <Windows.h>
+#include <objidl.h>
 #include <TlHelp32.h>
 #include <vector>
+#include <string>
+#include <gdiplus.h>
+
+#pragma comment (lib, "gdiplus.lib")
+
+using namespace Gdiplus;
 
 #define MAX_LOADSTRING 100
 
 std::vector<LPCWSTR> targetProcesses = {
 	L"notepad++.exe",
-	L"explorer.exe",
+	L"cmd.exe",
 };
 
 // Global Variables:
@@ -19,12 +26,18 @@ HINSTANCE hInst;                                // current instance
 WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 
+bool isDragging = false;
+POINT dragStartPoint;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 void CreateRoundWindow(HWND hwnd);
+void Draw3DBall(HDC hdc, int x, int y, int radius);
+void SnapToEdge(HWND hWnd, RECT rc);
+BOOL IsAnyTargetProcessRunning(const std::vector<LPCWSTR>& processNames);
+
 
 // Check if target process is running
 BOOL IsAnyTargetProcessRunning(const std::vector<LPCWSTR>& processNames) {
@@ -77,10 +90,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	_In_ LPWSTR    lpCmdLine,
 	_In_ int       nCmdShow)
 {
+	GdiplusStartupInput gdiplusStartupInput;
+	ULONG_PTR gdiplusToken;
+	GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(lpCmdLine);
-
-	// TODO: Place code here.
 
 	// Initialize global strings
 	LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
@@ -106,6 +121,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 			DispatchMessage(&msg);
 		}
 	}
+
+	GdiplusShutdown(gdiplusToken);
 
 	return (int)msg.wParam;
 }
@@ -152,15 +169,18 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
 	hInst = hInstance; // Store instance handle in our global variable
 
-	HWND hWnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+	HWND hWnd = CreateWindowExW(
+		WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
 		szWindowClass, szTitle, WS_POPUP,
-		CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+		GetSystemMetrics(SM_CXSCREEN) - 150, 0, 150, 150,
+		nullptr, nullptr, hInstance, nullptr);
 
 	if (!hWnd)
 	{
 		return FALSE;
 	}
 
+	SetLayeredWindowAttributes(hWnd, 0, 127, LWA_ALPHA);
 	ShowWindow(hWnd, nCmdShow);
 	UpdateWindow(hWnd);
 
@@ -170,7 +190,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 }
 
 void CreateRoundWindow(HWND hWnd) {
-	HRGN hRgn = CreateEllipticRgn(0, 0, 200, 200);
+	HRGN hRgn = CreateEllipticRgn(0, 0, 150, 150);
 	SetWindowRgn(hWnd, hRgn, TRUE);
 }
 
@@ -188,18 +208,53 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
 	switch (message)
 	{
-	case WM_COMMAND:
+	case WM_LBUTTONDBLCLK:
 		if (IsAnyTargetProcessRunning(targetProcesses)) {
 			int result = MessageBox(hWnd, L"Target process detected. Do you want to shut down?", L"Shutdown", MB_YESNO);
 			if (result == IDYES) {
 				ShutdownSystem();
 			}
 		}
+
+		break;
+	case WM_LBUTTONDOWN:
+		isDragging = true;
+		dragStartPoint.x = LOWORD(lParam);
+		dragStartPoint.y = HIWORD(lParam);
+		SetCapture(hWnd);
+
+		break;
+	case WM_MOUSEMOVE:
+		if (isDragging) {
+			POINT currentPoint;
+			currentPoint.x = LOWORD(lParam);
+			currentPoint.y = HIWORD(lParam);
+			int dx = currentPoint.x - dragStartPoint.x;
+			int dy = currentPoint.y - dragStartPoint.y;
+
+			RECT rc;
+			GetWindowRect(hWnd, &rc);
+			SetWindowPos(hWnd, nullptr, rc.left + dx, rc.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+			std::wstring message = L"Window Position: (" + std::to_wstring(rc.left) + L", " + std::to_wstring(rc.top) + L")\n";
+			message += L"Drag Start Point Position: (" + std::to_wstring(dragStartPoint.x) + L", " + std::to_wstring(dragStartPoint.y) + L")\n";
+			message += L"Current Point Position: (" + std::to_wstring(currentPoint.x) + L", " + std::to_wstring(currentPoint.y) + L")\n";
+			OutputDebugString(message.c_str());
+		}
+
+		break;
+	case WM_LBUTTONUP:
+		isDragging = false;
+		RECT rc;
+		GetWindowRect(hWnd, &rc);
+		SnapToEdge(hWnd, rc);
+		ReleaseCapture();
 		break;
 	case WM_PAINT:
 	{
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(hWnd, &ps);
+		Draw3DBall(hdc, 0, 0, 75);
 		EndPaint(hWnd, &ps);
 	}
 	break;
@@ -211,3 +266,69 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	}
 	return 0;
 }
+
+void Draw3DBall(HDC hdc, int x, int y, int radius)
+{
+	Graphics graphics(hdc);
+
+	graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+	graphics.SetCompositingQuality(CompositingQualityHighQuality);
+	graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+
+	GraphicsPath path;
+	path.AddEllipse(x, y, radius * 2, radius * 2);
+
+	PathGradientBrush gradientBrush(&path);
+
+	Color centerColor(255, 255, 255, 255);
+	gradientBrush.SetCenterColor(centerColor);
+
+	Color surroundColor(255, 0, 128, 255);
+	INT count = 1;
+	Color colors[1] = { surroundColor };
+	gradientBrush.SetSurroundColors(colors, &count);
+
+
+	PointF centerPoint(0.3f, 0.3f);
+	gradientBrush.SetCenterPoint(centerPoint);
+
+	graphics.FillEllipse(&gradientBrush, x, y, radius * 2, radius * 2);
+
+	SolidBrush highlightBrush(Color(180, 255, 255, 255));
+	int highlightRadius = radius / 3;
+	graphics.FillEllipse(&highlightBrush, x + radius / 3, y + radius / 3, highlightRadius, highlightRadius);
+}
+
+void SnapToEdge(HWND hWnd, RECT rc)
+{
+	int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+	int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+	int windowWidth = rc.right - rc.left;
+	int windowHeight = rc.bottom - rc.top;
+
+	const int snapThreshold = 30;
+
+	int x = rc.left, y = rc.top;
+
+	if (rc.left < snapThreshold)
+	{
+		x = -windowWidth / 2;
+	}
+	else if (screenWidth - rc.right < snapThreshold)
+	{
+		x = screenWidth - (windowWidth / 2);
+	}
+
+	if (rc.top < snapThreshold)
+	{
+		y = -windowHeight / 2;
+	}
+	else if (screenHeight - rc.bottom < snapThreshold)
+	{
+		y = screenHeight - (windowHeight / 2);
+	}
+
+	SetWindowPos(hWnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+}
+
